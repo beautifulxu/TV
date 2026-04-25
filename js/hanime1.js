@@ -1,6 +1,7 @@
 const HOST = 'https://hanime1.me';
 const HEADERS = {
   'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+  'Origin': HOST,
   'Referer': `${HOST}/`,
 };
 
@@ -16,9 +17,16 @@ const CLASSES = [
   ['Cosplay', 'Cosplay'],
 ];
 
-function request(url) {
+function headers(referer) {
+  const items = {};
+  for (const key in HEADERS) items[key] = HEADERS[key];
+  if (referer) items.Referer = referer;
+  return items;
+}
+
+function request(url, referer) {
   try {
-    const res = globalThis._http(url, { headers: HEADERS, timeout: 15000 });
+    const res = globalThis._http(url, { headers: headers(referer), timeout: 15000 });
     if (res && res.content) {
       if (res.content.indexOf('Attention Required') !== -1 || res.content.indexOf('Cloudflare') !== -1) {
         return '';
@@ -29,11 +37,113 @@ function request(url) {
   return '';
 }
 
+function decode(value) {
+  return (value || '')
+    .replace(/\\\//g, '/')
+    .replace(/&amp;/g, '&')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>');
+}
+
+function text(value) {
+  return decode(value)
+    .replace(/<[^>]+>/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 function abs(url) {
   if (!url) return '';
   if (url.startsWith('//')) return `https:${url}`;
   if (url.startsWith('/')) return `${HOST}${url}`;
   return url;
+}
+
+function query(url, key) {
+  const match = String(url || '').match(new RegExp(`[?&]${key}=([^&#]+)`));
+  return match ? decodeURIComponent(match[1]) : '';
+}
+
+function unique(items) {
+  const seen = {};
+  const list = [];
+  for (const item of items) {
+    if (!item || !item.url || seen[item.url]) continue;
+    seen[item.url] = true;
+    list.push(item);
+  }
+  return list;
+}
+
+function qualityFromUrl(url) {
+  const match = String(url || '').match(/(?:^|[-_/])(\d{3,4}p)(?:[-_.?/#]|$)/i);
+  return match ? match[1] : '';
+}
+
+function parseDownloadList(html) {
+  const list = [];
+  if (!html) return list;
+
+  const tableMatch = html.match(/<table[^>]*class="[^"]*download-table[^"]*"[\s\S]*?<\/table>/i);
+  const source = tableMatch ? tableMatch[0] : html;
+  const linkRegex = /<a\b([^>]*)>([\s\S]*?)<\/a>/gi;
+  let match;
+  while ((match = linkRegex.exec(source)) !== null) {
+    const attrs = match[1];
+    const hrefMatch = attrs.match(/\bhref=(["'])(.*?)\1/i);
+    if (!hrefMatch) continue;
+
+    const url = abs(decode(hrefMatch[2]));
+    if (!/\.(mp4|m3u8)(?:[?#]|$)/i.test(url)) continue;
+
+    const downloadMatch = attrs.match(/\bdownload=(["'])(.*?)\1/i);
+    const rawName = downloadMatch ? downloadMatch[2] : match[2];
+    const quality = qualityFromUrl(url);
+    const name = text(rawName) || quality || `播放${list.length + 1}`;
+    list.push({ name, url });
+  }
+  return unique(list);
+}
+
+function parseInlineVideos(html) {
+  const list = [];
+  if (!html) return list;
+
+  const sourceRegex = /<(?:source|video)\b[^>]*(?:src|data-src)=(["'])(.*?)\1/gi;
+  let sourceMatch;
+  while ((sourceMatch = sourceRegex.exec(html)) !== null) {
+    const url = abs(decode(sourceMatch[2]));
+    if (/\.(mp4|m3u8)(?:[?#]|$)/i.test(url)) {
+      list.push({ name: qualityFromUrl(url) || `播放${list.length + 1}`, url });
+    }
+  }
+
+  const attrRegex = /(?:file|src|url)\s*[:=]\s*(["'])(https?:\\?\/\\?\/.*?\.(?:mp4|m3u8).*?)\1/gi;
+  let attrMatch;
+  while ((attrMatch = attrRegex.exec(html)) !== null) {
+    const url = decode(attrMatch[2]);
+    list.push({ name: qualityFromUrl(url) || `播放${list.length + 1}`, url });
+  }
+
+  const urlRegex = /https?:\\?\/\\?\/(?:\\\/|[^"'<>\\\s])+?\.(?:mp4|m3u8)(?:\?(?:\\\/|[^"'<>\\\s])*)?/gi;
+  let urlMatch;
+  while ((urlMatch = urlRegex.exec(html)) !== null) {
+    const url = decode(urlMatch[0]);
+    list.push({ name: qualityFromUrl(url) || `播放${list.length + 1}`, url });
+  }
+
+  return unique(list);
+}
+
+function buildPlayUrl(items) {
+  return unique(items)
+    .map((item, index) => {
+      const name = text(item.name).replace(/[$#]/g, ' ').replace(/\s+/g, ' ').trim() || `播放${index + 1}`;
+      return `${name}$${item.url}`;
+    })
+    .join('#');
 }
 
 function parseList(html) {
@@ -152,40 +262,36 @@ const spider = {
   },
 
   detail(id) {
-    const html = request(abs(id));
+    const pageUrl = abs(id);
+    const html = request(pageUrl);
     if (!html) {
       return JSON.stringify({ list: [] });
     }
 
-    // Extract video source: <source src="...">
-    const sourceMatch = html.match(/<source[^>]*src="([^"]+)"/);
-    const videoUrl = sourceMatch ? sourceMatch[1] : '';
+    const vid = query(pageUrl, 'v');
+    const downloadHtml = vid ? request(`${HOST}/download?v=${encodeURIComponent(vid)}`, pageUrl) : '';
+    const playItems = parseDownloadList(downloadHtml).concat(parseInlineVideos(html));
 
     // Extract title from og:title
     const ogTitleMatch = html.match(/<meta[^>]*property="og:title"[^>]*content="([^"]+)"/);
-    const name = ogTitleMatch ? ogTitleMatch[1].replace(/ - Hanime1\.me$/, '') : '';
+    const name = ogTitleMatch ? decode(ogTitleMatch[1]).replace(/ - Hanime1\.me$/, '') : '';
 
     // Extract description
     const descMatch = html.match(/<meta[^>]*name="description"[^>]*content="([^"]*)"/);
-    const desc = descMatch ? descMatch[1] : '';
+    const desc = descMatch ? decode(descMatch[1]) : '';
 
     // Extract image from og:image
     const imgMatch = html.match(/<meta[^>]*property="og:image"[^>]*content="([^"]+)"/);
     const pic = imgMatch ? imgMatch[1] : '';
 
-    // Build play URL with all available resolutions
-    let playUrl = '';
-    if (videoUrl) {
-      playUrl = `1$${videoUrl}`;
-    }
     return JSON.stringify({
       list: [{
-        vod_id: abs(id),
+        vod_id: pageUrl,
         vod_name: name,
         vod_pic: pic,
         vod_content: desc,
         vod_play_from: 'hanime1',
-        vod_play_url: playUrl,
+        vod_play_url: buildPlayUrl(playItems),
       }],
     });
   },
