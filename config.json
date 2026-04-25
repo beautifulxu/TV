@@ -1,6 +1,15 @@
 {
   "sites": [
     {
+      "key": "badnews",
+      "name": "bad.news｜动漫",
+      "type": 3,
+      "api": "./js/badnews.js",
+      "searchable": 1,
+      "quickSearch": 1,
+      "filterable": 0
+    },
+    {
       "key": "koolearn",
       "name": "📚新东方公开课",
       "type": 3,
@@ -1503,15 +1512,6 @@
       "api": "https://qist.wyfc.qzz.io/lib/drpy2.min.js",
       "ext": "https://qist.wyfc.qzz.io/js/爱动漫.js",
       "jar": "https://qist.wyfc.qzz.io/jar/spider.jar;md5;427721a1497c71587dca53a2d80f2b42"
-    },
-    {
-      "key": "badnews",
-      "name": "bad.news｜动漫",
-      "type": 3,
-      "api": "./js/badnews.js",
-      "searchable": 1,
-      "quickSearch": 1,
-      "filterable": 0
     },
     {
       "key": "路漫漫",
