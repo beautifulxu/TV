@@ -3,20 +3,31 @@ const CDN = 'https://fourhoi.com';
 const HEADERS = {
   'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
   'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-  'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+  'Accept-Language': 'zh-TW,zh;q=0.9,en;q=0.8',
+  'Origin': HOST,
   'Referer': `${HOST}/`,
 };
 
 const CLASSES = [
-  ['dm265', '动漫'],
+  ['全部', '全部'],
+  ['FC2', 'FC2'],
+  ['中文字幕', '中文字幕'],
+  ['無碼影片', '無碼影片'],
+  ['HD', 'HD'],
 ];
 
-function request(url) {
+function headers(referer) {
+  const items = {};
+  for (const key in HEADERS) items[key] = HEADERS[key];
+  if (referer) items.Referer = referer;
+  return items;
+}
+
+function request(url, referer) {
   try {
-    const res = globalThis._http(url, { headers: HEADERS, timeout: 15000 });
+    const res = globalThis._http(url, { headers: headers(referer), timeout: 15000 });
     if (res && res.content) {
-      // Check for Cloudflare block
-      if (res.content.indexOf('Just a moment') !== -1 || res.content.indexOf('Attention Required') !== -1 || res.content.indexOf('Cloudflare') !== -1) {
+      if (res.content.indexOf('Attention Required') !== -1 || res.content.indexOf('Cloudflare') !== -1 || res.content.indexOf('Just a moment') !== -1) {
         return '';
       }
       return res.content;
@@ -25,13 +36,19 @@ function request(url) {
   return '';
 }
 
-function text(value) {
+function decode(value) {
   return (value || '')
-    .replace(/<[^>]+>/g, '')
-    .replace(/&nbsp;/g, ' ')
+    .replace(/\\\//g, '/')
     .replace(/&/g, '&')
-    .replace(/&#39;/g, "'")
     .replace(/"/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/</g, '<')
+    .replace(/>/g, '>');
+}
+
+function text(value) {
+  return decode(value)
+    .replace(/<[^>]+>/g, '')
     .replace(/\s+/g, ' ')
     .trim();
 }
@@ -43,208 +60,230 @@ function abs(url) {
   return url;
 }
 
+function unique(items) {
+  const seen = {};
+  const list = [];
+  for (const item of items) {
+    if (!item || !item.url || seen[item.url]) continue;
+    seen[item.url] = true;
+    list.push(item);
+  }
+  return list;
+}
+
+function qualityFromUrl(url) {
+  const match = String(url || '').match(/(?:^|[-_/])(\d{3,4}p)(?:[-_.?/#]|$)/i);
+  return match ? match[1] : '';
+}
+
+function attr(source, name) {
+  const match = String(source || '').match(new RegExp(`\\b${name}\\s*=\\s*(['"])(.*?)\\1`, 'i'));
+  return match ? decode(match[2]) : '';
+}
+
 /**
- * Decode the eval'd JavaScript from the detail page to extract video URLs.
- * The format is:
- *   eval(function(p,a,c,k,e,d){...}('encoded_string',N,N,'key1|key2|...'.split('|'),0,{}))
- * 
- * The encoded string uses placeholders: 0-9 for first 10 keys, then a,b,c... for subsequent keys.
- * Uses two-pass replacement to avoid conflicts between placeholders and key values.
+ * Decode the packed eval JS used by missav to hide video URLs.
+ * Format: eval(function(p,a,c,k,e,d){...}('...',16,16,'word1|word2|...'.split('|'),0,{}))
  */
 function decodeEval(html) {
-  if (!html) return null;
+  if (!html) return '';
   
-  // Find eval(function by index
-  const idx = html.indexOf('eval(function');
-  if (idx < 0) return null;
+  // Find the eval statement
+  const evalIdx = html.indexOf('eval(function(p,a,c,k,e,d)');
+  if (evalIdx === -1) return '';
   
-  // Count parentheses to find the full eval expression
+  // Extract the full eval by counting parentheses
   let depth = 0;
-  let end = idx;
-  for (let i = idx; i < html.length; i++) {
+  let end = evalIdx;
+  for (let i = evalIdx; i < html.length; i++) {
     if (html[i] === '(') depth++;
     else if (html[i] === ')') {
       depth--;
-      if (depth === 0) {
-        end = i + 1;
-        break;
-      }
+      if (depth === 0) { end = i + 1; break; }
     }
   }
   
-  const evalStr = html.substring(idx, end);
+  const evalStr = html.substring(evalIdx, end);
   
-  // Find the arguments after the function body: }('...') or }("...")
-  const argsStart = evalStr.indexOf('}(');
-  if (argsStart < 0) return null;
+  // Find the arguments: after 'return p}('
+  const argsStart = evalStr.indexOf('return p}(') + 'return p}('.length;
+  const args = evalStr.substring(argsStart, evalStr.length - 2); // remove trailing '))'
   
-  const args = evalStr.substring(argsStart + 2, evalStr.length - 2);
+  // Parse the comma-separated arguments
+  // arg1: encoded string (starts and ends with ', may contain escaped quotes \')
+  // arg2: radix (number)
+  // arg3: count (number)
+  // arg4: word list string (starts and ends with ')
+  // arg5: 0
+  // arg6: {}
   
-  // Find .split from the end to locate the keys string
-  const splitPos = args.lastIndexOf('.split');
-  if (splitPos < 0) return null;
+  let i = 0;
   
-  // Go backwards from splitPos to find the keys string (between quotes)
-  let keysStart = -1;
-  let keysEnd = -1;
-  for (let i = splitPos - 1; i >= 0; i--) {
-    if (args[i] === "'" || args[i] === '"') {
-      keysEnd = i;  // closing quote of the keys string
-      // Find the opening quote
-      for (let j = i - 1; j >= 0; j--) {
-        if (args[j] === args[i]) {
-          keysStart = j + 1;
-          break;
-        }
-      }
+  // Skip whitespace
+  while (i < args.length && args[i] === ' ') i++;
+  
+  // Parse arg1: the encoded string
+  if (args[i] !== "'") return '';
+  i++; // skip opening quote
+  let encoded = '';
+  while (i < args.length) {
+    if (args[i] === '\\' && i + 1 < args.length && args[i+1] === "'") {
+      encoded += "'";
+      i += 2;
+    } else if (args[i] === "'") {
+      i++; // skip closing quote
       break;
-    }
-  }
-  if (keysStart < 0 || keysEnd < 0) return null;
-  
-  const keysStr = args.substring(keysStart, keysEnd);
-  const keys = keysStr.split('|');
-  
-  // Find the first quoted string (encoded data)
-  let encodedStart = -1;
-  let encodedEnd = -1;
-  let encodedQuoteChar = '';
-  for (let i = 0; i < args.length; i++) {
-    if (args[i] === "'" || args[i] === '"') {
-      encodedStart = i + 1;
-      encodedQuoteChar = args[i];
-      // Find the matching closing quote
-      for (let j = i + 1; j < args.length; j++) {
-        if (args[j] === encodedQuoteChar) {
-          encodedEnd = j;
-          break;
-        }
-      }
-      break;
-    }
-  }
-  if (encodedStart < 0 || encodedEnd < 0) return null;
-  
-  const encoded = args.substring(encodedStart, encodedEnd);
-  
-  // Two-pass replacement to avoid conflicts
-  // Pass 1: Replace placeholders with unique temp markers
-  let temp = encoded;
-  const tempMarkers = [];
-  for (let i = 0; i < keys.length; i++) {
-    let placeholder;
-    if (i < 10) {
-      placeholder = String(i);
     } else {
-      placeholder = String.fromCharCode(97 + i - 10);
+      encoded += args[i];
+      i++;
     }
-    const tempMarker = '\x00TEMP' + i + '\x00';
-    tempMarkers.push({ tempMarker, value: keys[i] });
-    temp = temp.split(placeholder).join(tempMarker);
   }
   
-  // Pass 2: Replace temp markers with actual values
-  let result = temp;
-  for (const { tempMarker, value } of tempMarkers) {
-    result = result.split(tempMarker).join(value);
+  // Skip whitespace and comma
+  while (i < args.length && (args[i] === ' ' || args[i] === ',')) i++;
+  
+  // Parse arg2: radix
+  let radixStr = '';
+  while (i < args.length && /\d/.test(args[i])) {
+    radixStr += args[i];
+    i++;
+  }
+  const radix = parseInt(radixStr);
+  
+  // Skip whitespace and comma
+  while (i < args.length && (args[i] === ' ' || args[i] === ',')) i++;
+  
+  // Parse arg3: count
+  let countStr = '';
+  while (i < args.length && /\d/.test(args[i])) {
+    countStr += args[i];
+    i++;
+  }
+  const count = parseInt(countStr);
+  
+  // Skip whitespace and comma
+  while (i < args.length && (args[i] === ' ' || args[i] === ',')) i++;
+  
+  // Parse arg4: word list string
+  if (args[i] !== "'") return '';
+  i++; // skip opening quote
+  let wordsStr = '';
+  while (i < args.length) {
+    if (args[i] === "'") {
+      i++; // skip closing quote
+      break;
+    } else {
+      wordsStr += args[i];
+      i++;
+    }
+  }
+  const words = wordsStr.split('|');
+  
+  // Build the dictionary
+  const dict = {};
+  for (let j = 0; j < count && j < words.length; j++) {
+    const key = j.toString(radix);
+    dict[key] = words[j];
+  }
+  
+  // Replace all word boundaries
+  let result = encoded;
+  for (const key in dict) {
+    const regex = new RegExp('\\b' + key + '\\b', 'g');
+    result = result.replace(regex, dict[key]);
   }
   
   return result;
 }
 
 /**
- * Extract video UUID from the decoded eval content.
- * The decoded content contains URLs like:
- *   https://surrit.com/{uuid}/playlist.m3u8
- *   https://surrit.com/{uuid}/video/720p.m3u8
+ * Extract video URLs from the decoded eval JS.
+ * The decoded JS contains variable assignments like:
+ *   source='https://surrit.com/.../playlist.m3u8';
+ *   source842='https://surrit.com/.../720p/video.m3u8';
+ *   source1280='https://surrit.com/.../1080p/video.m3u8';
  */
-function extractVideoUrl(decoded) {
-  if (!decoded) return '';
+function extractVideoUrls(decoded) {
+  const urls = [];
+  if (!decoded) return urls;
   
-  // Try to find surrit.com playlist URL
-  const playlistMatch = decoded.match(/https:\/\/surrit\.com\/([a-f0-9-]+)\/playlist\.m3u8/);
-  if (playlistMatch) {
-    return playlistMatch[0];
+  // Match all URL assignments
+  const urlRegex = /['"](https?:\/\/[^'"]+\.m3u8[^'"]*)['"]/g;
+  let match;
+  while ((match = urlRegex.exec(decoded)) !== null) {
+    const url = match[1];
+    if (!urls.some(u => u.url === url)) {
+      const quality = qualityFromUrl(url);
+      urls.push({
+        name: quality || `播放${urls.length + 1}`,
+        url: url,
+      });
+    }
   }
   
-  // Try to find any surrit.com video URL
-  const surritMatch = decoded.match(/https:\/\/surrit\.com\/[a-f0-9-]+\/video\/\d+p\.m3u8/);
-  if (surritMatch) {
-    return surritMatch[0];
-  }
-  
-  // Try to find any m3u8 URL
-  const m3u8Match = decoded.match(/https:[^"'<>]+\.m3u8/);
-  if (m3u8Match) {
-    return m3u8Match[0];
-  }
-  
-  return '';
+  return urls;
 }
 
-/**
- * Parse video items from the missav page HTML.
- * The page has video items in preload divs and recommendation sections.
- * Each item has:
- *   <a href="https://missav.ws/{path}" alt="{dvd_id}">
- *   <img data-src="https://fourhoi.com/{dvd_id}/cover-t.jpg" alt="{title}">
- */
 function parseList(html) {
   const list = [];
   if (!html) return list;
 
-  // Pattern: Find video items by looking for <a> tags with href to missav.ws
-  // that contain an <img> with data-src from fourhoi.com
-  // Note: The alt attribute can appear before or after href in the <a> tag
-  const itemRegex = /<a\s+(?:href="https:\/\/missav\.ws(\/[^"]+)"[^>]*alt="([^"]*)"|alt="([^"]*)"[^>]*href="https:\/\/missav\.ws(\/[^"]+)")[^>]*>[\s\S]*?<img[^>]*data-src="https:\/\/fourhoi\.com\/([^"]+)\/cover-t\.jpg"[^>]*alt="([^"]*)"[\s\S]*?<\/a>/gi;
-  let match;
-  const seen = new Set();
-  
-  while ((match = itemRegex.exec(html)) !== null) {
-    // Handle both orderings of href and alt
-    const href = match[1] || match[4];
-    const altId = match[2] || match[3];
-    const dvdId = match[5];
-    const title = match[6];
-    
-    // Skip duplicates - use href as the primary key since it's the actual video page URL
-    if (!href || !title) continue;
-    if (seen.has(href)) continue;
-    seen.add(href);
-    
-    const vodId = `${HOST}${href}`;
-    const vodPic = `${CDN}/${dvdId}/cover-t.jpg`;
-    
-    list.push({
-      vod_id: vodId,
-      vod_name: text(title),
-      vod_pic: vodPic,
-    });
-  }
+  // The page has SSR-rendered cards with actual data.
+  // Two patterns:
+  // 1. With wrapper: <div class="">\n    <div @mouseenter="setPreview(...)" ... class="thumbnail group">
+  // 2. Without wrapper: <div @mouseenter="setPreview(...)" ... class="thumbnail group">
+  //
+  // Inner structure:
+  // <div @mouseenter="setPreview('UUID')" ... class="thumbnail group">
+  //   <div class="relative aspect-w-16 aspect-h-9 rounded overflow-hidden shadow-lg">
+  //     <a href="https://missav.ws/DVD_ID" alt="DVD_ID">
+  //       <video ... data-src="https://fourhoi.com/DVD_ID/preview.mp4"></video>
+  //       <img ... data-src="https://fourhoi.com/DVD_ID/cover-t.jpg" alt="TITLE">
+  //     </a>
+  //     ...
+  //   </div>
+  //   <div class="my-2 text-sm text-nord4 truncate">
+  //     <a class="text-secondary group-hover:text-primary" href="https://missav.ws/DVD_ID" alt="DVD_ID">TITLE</a>
+  //   </div>
+  // </div>
 
-  // Fallback: Try to find items from the preload divs
-  if (list.length === 0) {
-    const preloadRegex = /<div\s+id="preload_\d+"[^>]*>[\s\S]*?<a\s+(?:href="https:\/\/missav\.ws(\/[^"]+)"[^>]*alt="([^"]*)"|alt="([^"]*)"[^>]*href="https:\/\/missav\.ws(\/[^"]+)")[^>]*>[\s\S]*?<img[^>]*data-src="https:\/\/fourhoi\.com\/([^"]+)\/cover-t\.jpg"[^>]*alt="([^"]*)"[\s\S]*?<\/a>/gi;
-    let pMatch;
-    while ((pMatch = preloadRegex.exec(html)) !== null) {
-      const href = pMatch[1] || pMatch[4];
-      const altId = pMatch[2] || pMatch[3];
-      const dvdId = pMatch[5];
-      const title = pMatch[6];
-      
-      if (!href || !title) continue;
-      if (seen.has(href)) continue;
-      seen.add(href);
-      
-      list.push({
-        vod_id: `${HOST}${href}`,
-        vod_name: text(title),
-        vod_pic: `${CDN}/${dvdId}/cover-t.jpg`,
-      });
+  // Match all SSR-rendered cards - find the thumbnail group divs that contain actual hrefs
+  const cardRegex = /<div @mouseenter="setPreview\('[^']+'\)"[^>]*class="thumbnail group">\s*<div class="relative aspect-w-16 aspect-h-9 rounded overflow-hidden shadow-lg">\s*<a href="https:\/\/missav\.ws\/([^"]+)" alt="[^"]*">[\s\S]*?<\/a>[\s\S]*?<\/div>\s*<div class="my-2 text-sm text-nord4 truncate">\s*<a class="[^"]*" href="https:\/\/missav\.ws\/[^"]+" alt="[^"]*">([\s\S]*?)<\/a>\s*<\/div>\s*<\/div>/g;
+  let match;
+  while ((match = cardRegex.exec(html)) !== null) {
+    const dvdId = match[1];
+    const title = text(match[2]);
+    
+    // Extract the cover image from the card content
+    const cardContent = match[0];
+    const imgMatch = cardContent.match(/<img[^>]*data-src="([^"]+)"[^>]*>/);
+    const pic = imgMatch ? imgMatch[1] : '';
+    
+    if (dvdId && title) {
+      const vodId = `${HOST}/${dvdId}`;
+      if (!list.some(v => v.vod_id === vodId)) {
+        list.push({
+          vod_id: vodId,
+          vod_name: title,
+          vod_pic: pic,
+        });
+      }
     }
   }
 
   return list;
+}
+
+function parsePageCount(html) {
+  // The page doesn't have traditional pagination for the home page
+  // For category/search pages, look for page links
+  const matches = html.match(/[?&]page=(\d+)/g) || [];
+  let maxPage = 1;
+  for (const m of matches) {
+    const num = parseInt(m.match(/(\d+)/)[1]);
+    if (num > maxPage) maxPage = num;
+  }
+  return maxPage || 1;
 }
 
 const spider = {
@@ -257,87 +296,76 @@ const spider = {
   },
 
   homeVod() {
-    return this.category('dm265', '1');
+    return this.category('全部', '1');
   },
 
   category(tid, pg) {
     const page = Number(pg || 1);
-    let url;
-    if (tid === 'dm265') {
-      url = page <= 1 ? `${HOST}/dm265` : `${HOST}/dm265/page/${page}`;
-    } else {
-      url = page <= 1 ? `${HOST}/category/${tid}` : `${HOST}/category/${tid}/page/${page}`;
+    let url = `${HOST}/dm265`;
+    if (tid && tid !== '全部') {
+      url = `${HOST}/dm265?filter=${encodeURIComponent(tid)}`;
     }
+    if (page > 1) {
+      url += `${url.includes('?') ? '&' : '?'}page=${page}`;
+    }
+    
     const html = request(url);
     const list = parseList(html);
+    const pagecount = parsePageCount(html);
+    
     return JSON.stringify({
       page,
-      pagecount: 1,
+      pagecount: pagecount || 1,
       limit: list.length || 24,
-      total: list.length,
+      total: list.length * (pagecount || 1),
       list: list,
     });
   },
 
   detail(id) {
     const pageUrl = abs(id);
-    
-    // Extract the dvd_id from the URL
-    // URL format: https://missav.ws/{dvd_id} or https://missav.ws/dm{num}/{dvd_id}
-    const dvdIdMatch = pageUrl.match(/([^/]+)\/?$/);
-    const dvdId = dvdIdMatch ? dvdIdMatch[1] : '';
-    
-    // Try to get the detail page (may fail due to Cloudflare)
     const html = request(pageUrl);
-    
-    let name = dvdId;
-    let pic = '';
-    let desc = '';
-    let videoUrl = '';
-    
-    if (html) {
-      // Extract title
-      const titleMatch = html.match(/<title>([\s\S]*?)<\/title>/i);
-      if (titleMatch) {
-        name = text(titleMatch[1]).replace(/ - missav.*$/i, '');
-      }
-      
-      // Extract description
-      const descMatch = html.match(/<meta[^>]*name="description"[^>]*content="([^"]*)"/i);
-      if (descMatch) desc = descMatch[1];
-      
-      // Extract image from og:image
-      const imgMatch = html.match(/<meta[^>]*property="og:image"[^>]*content="([^"]+)"/i);
-      if (imgMatch) pic = imgMatch[1];
-      
-      // Try to decode the eval'd JavaScript to get the real video URL
-      const decoded = decodeEval(html);
-      if (decoded) {
-        videoUrl = extractVideoUrl(decoded);
-      }
+    if (!html) {
+      return JSON.stringify({ list: [] });
     }
-    
-    // If we couldn't get the real video URL, fall back to preview.mp4
-    if (!videoUrl) {
-      videoUrl = `${CDN}/${dvdId}/preview.mp4`;
-    }
-    
-    const vodPlayUrl = `播放$${videoUrl}`;
+
+    // Extract title from og:title
+    const ogTitleMatch = html.match(/<meta[^>]*property="og:title"[^>]*content="([^"]+)"/);
+    const name = ogTitleMatch ? decode(ogTitleMatch[1]) : '';
+
+    // Extract image from og:image
+    const ogImageMatch = html.match(/<meta[^>]*property="og:image"[^>]*content="([^"]+)"/);
+    const pic = ogImageMatch ? ogImageMatch[1] : '';
+
+    // Extract description
+    const descMatch = html.match(/<meta[^>]*name="description"[^>]*content="([^"]*)"/);
+    const desc = descMatch ? decode(descMatch[1]) : '';
+
+    // Decode the eval'd JS to get video URLs
+    const decoded = decodeEval(html);
+    const playItems = extractVideoUrls(decoded);
+
+    // Build play URL string
+    const playUrls = playItems
+      .map((item, index) => {
+        const name = item.name || `播放${index + 1}`;
+        return `${name}$${item.url}`;
+      })
+      .join('#');
 
     return JSON.stringify({
       list: [{
         vod_id: pageUrl,
         vod_name: name,
-        vod_pic: pic || `${CDN}/${dvdId}/cover-t.jpg`,
+        vod_pic: pic,
         vod_content: desc,
         vod_play_from: 'missav',
-        vod_play_url: vodPlayUrl,
+        vod_play_url: playUrls || `${name}$${pageUrl}`,
       }],
     });
   },
 
   search(key) {
-    // Fix: Use /search/{keyword} format instead of /search?q=
     const url = `${HOST}/search/${encodeURIComponent(key)}`;
     const html = request(url);
     return JSON.stringify({
