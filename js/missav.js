@@ -8,6 +8,10 @@ const HEADERS = {
   'Referer': `${HOST}/`,
 };
 
+// Cloudflare 绕过代理 - 需要运行 missav_proxy.py
+// 留空则直接请求（可能被 Cloudflare 拦截）
+const PROXY = '';
+
 const CLASSES = [
   ['全部', '全部'],
   ['FC2', 'FC2'],
@@ -25,9 +29,22 @@ function headers(referer) {
 
 function request(url, referer) {
   try {
+    // 如果配置了代理，通过代理获取数据
+    if (PROXY) {
+      const proxyUrl = `${PROXY}/raw?url=${encodeURIComponent(url)}`;
+      const res = globalThis._http(proxyUrl, { headers: headers(referer), timeout: 30000 });
+      if (res && res.content) {
+        return res.content;
+      }
+    }
+    
+    // 直接请求
     const res = globalThis._http(url, { headers: headers(referer), timeout: 15000 });
     if (res && res.content) {
-      if (res.content.indexOf('Attention Required') !== -1 || res.content.indexOf('Cloudflare') !== -1 || res.content.indexOf('Just a moment') !== -1) {
+      if (res.content.indexOf('Attention Required') !== -1 || 
+          res.content.indexOf('Cloudflare') !== -1 || 
+          res.content.indexOf('Just a moment') !== -1 ||
+          res.content.indexOf('cf_chl') !== -1) {
         return '';
       }
       return res.content;
@@ -107,16 +124,9 @@ function decodeEval(html) {
   
   // Find the arguments: after 'return p}('
   const argsStart = evalStr.indexOf('return p}(') + 'return p}('.length;
-  const args = evalStr.substring(argsStart, evalStr.length - 2); // remove trailing '))'
+  const args = evalStr.substring(argsStart, evalStr.length - 2);
   
   // Parse the comma-separated arguments
-  // arg1: encoded string (starts and ends with ', may contain escaped quotes \')
-  // arg2: radix (number)
-  // arg3: count (number)
-  // arg4: word list string (starts and ends with ')
-  // arg5: 0
-  // arg6: {}
-  
   let i = 0;
   
   // Skip whitespace
@@ -124,14 +134,14 @@ function decodeEval(html) {
   
   // Parse arg1: the encoded string
   if (args[i] !== "'") return '';
-  i++; // skip opening quote
+  i++;
   let encoded = '';
   while (i < args.length) {
     if (args[i] === '\\' && i + 1 < args.length && args[i+1] === "'") {
       encoded += "'";
       i += 2;
     } else if (args[i] === "'") {
-      i++; // skip closing quote
+      i++;
       break;
     } else {
       encoded += args[i];
@@ -166,11 +176,11 @@ function decodeEval(html) {
   
   // Parse arg4: word list string
   if (args[i] !== "'") return '';
-  i++; // skip opening quote
+  i++;
   let wordsStr = '';
   while (i < args.length) {
     if (args[i] === "'") {
-      i++; // skip closing quote
+      i++;
       break;
     } else {
       wordsStr += args[i];
@@ -198,16 +208,11 @@ function decodeEval(html) {
 
 /**
  * Extract video URLs from the decoded eval JS.
- * The decoded JS contains variable assignments like:
- *   source='https://surrit.com/.../playlist.m3u8';
- *   source842='https://surrit.com/.../720p/video.m3u8';
- *   source1280='https://surrit.com/.../1080p/video.m3u8';
  */
 function extractVideoUrls(decoded) {
   const urls = [];
   if (!decoded) return urls;
   
-  // Match all URL assignments
   const urlRegex = /['"](https?:\/\/[^'"]+\.m3u8[^'"]*)['"]/g;
   let match;
   while ((match = urlRegex.exec(decoded)) !== null) {
@@ -228,38 +233,30 @@ function parseList(html) {
   const list = [];
   if (!html) return list;
 
-  // The page has SSR-rendered cards with actual data.
-  // Two patterns:
-  // 1. With wrapper: <div class="">\n    <div @mouseenter="setPreview(...)" ... class="thumbnail group">
-  // 2. Without wrapper: <div @mouseenter="setPreview(...)" ... class="thumbnail group">
-  //
-  // Inner structure:
-  // <div @mouseenter="setPreview('UUID')" ... class="thumbnail group">
-  //   <div class="relative aspect-w-16 aspect-h-9 rounded overflow-hidden shadow-lg">
-  //     <a href="https://missav.ws/DVD_ID" alt="DVD_ID">
-  //       <video ... data-src="https://fourhoi.com/DVD_ID/preview.mp4"></video>
-  //       <img ... data-src="https://fourhoi.com/DVD_ID/cover-t.jpg" alt="TITLE">
-  //     </a>
-  //     ...
-  //   </div>
-  //   <div class="my-2 text-sm text-nord4 truncate">
-  //     <a class="text-secondary group-hover:text-primary" href="https://missav.ws/DVD_ID" alt="DVD_ID">TITLE</a>
-  //   </div>
-  // </div>
-
-  // Match all SSR-rendered cards - find the thumbnail group divs that contain actual hrefs
-  const cardRegex = /<div @mouseenter="setPreview\('[^']+'\)"[^>]*class="thumbnail group">\s*<div class="relative aspect-w-16 aspect-h-9 rounded overflow-hidden shadow-lg">\s*<a href="https:\/\/missav\.ws\/([^"]+)" alt="[^"]*">[\s\S]*?<\/a>[\s\S]*?<\/div>\s*<div class="my-2 text-sm text-nord4 truncate">\s*<a class="[^"]*" href="https:\/\/missav\.ws\/[^"]+" alt="[^"]*">([\s\S]*?)<\/a>\s*<\/div>\s*<\/div>/g;
+  // missav.ws 使用 Alpine.js 客户端渲染，数据来自 Recombee API
+  // 页面中的 data-src 可能是 Alpine.js 模板语法或真实 URL
+  // 我们通过 href 和 alt 属性来提取视频信息
+  
+  // 方法1: 匹配有真实 data-src 的 SSR 卡片
+  // <a href="https://missav.ws/DVD_ID" ...>
+  //   <img data-src="https://fourhoi.com/DVD_ID/cover-t.jpg" alt="TITLE">
+  // </a>
+  const cardRegex = /<a\s+href="https:\/\/missav\.ws\/([^"]+)"[^>]*>\s*(?:<video[^>]*>)?\s*<img[^>]*data-src="(https:\/\/fourhoi\.com\/[^"]+)"[^>]*alt="([^"]*)"[^>]*>/g;
   let match;
   while ((match = cardRegex.exec(html)) !== null) {
     const dvdId = match[1];
-    const title = text(match[2]);
+    const pic = match[2];
+    const title = text(match[3]);
     
-    // Extract the cover image from the card content
-    const cardContent = match[0];
-    const imgMatch = cardContent.match(/<img[^>]*data-src="([^"]+)"[^>]*>/);
-    const pic = imgMatch ? imgMatch[1] : '';
-    
-    if (dvdId && title) {
+    // 过滤掉非视频链接（分类页面、导航等）
+    if (dvdId && title && 
+        !dvdId.startsWith('dm') && 
+        !dvdId.startsWith('fc2') &&
+        !dvdId.startsWith('build/') &&
+        !dvdId.startsWith('fonts/') &&
+        !dvdId.startsWith('img/') &&
+        !dvdId.includes('/') &&
+        title.length > 2) {
       const vodId = `${HOST}/${dvdId}`;
       if (!list.some(v => v.vod_id === vodId)) {
         list.push({
@@ -271,12 +268,41 @@ function parseList(html) {
     }
   }
 
+  // 方法2: 如果方法1没找到，尝试从 Alpine.js 模板中提取
+  // 匹配 @mouseenter="setPreview('UUID')" 的卡片
+  if (list.length === 0) {
+    const altRegex = /@mouseenter="setPreview\('[^']+'\)"[^>]*>[\s\S]*?<a\s+href="https:\/\/missav\.ws\/([^"]+)"[^>]*>[\s\S]*?<img[^>]*data-src="([^"]*)"[^>]*alt="([^"]*)"[^>]*>/g;
+    while ((match = altRegex.exec(html)) !== null) {
+      const dvdId = match[1];
+      const pic = match[2];
+      const title = text(match[3]);
+      
+      if (dvdId && title && 
+          !dvdId.startsWith('dm') && 
+          !dvdId.startsWith('fc2') &&
+          !dvdId.startsWith('build/') &&
+          !dvdId.startsWith('fonts/') &&
+          !dvdId.startsWith('img/') &&
+          !dvdId.includes('/') &&
+          title.length > 2) {
+        const vodId = `${HOST}/${dvdId}`;
+        if (!list.some(v => v.vod_id === vodId)) {
+          // 如果 pic 是 Alpine 模板语法，构造 CDN URL
+          const realPic = pic.startsWith('http') ? pic : `${CDN}/${dvdId}/cover-t.jpg`;
+          list.push({
+            vod_id: vodId,
+            vod_name: title,
+            vod_pic: realPic,
+          });
+        }
+      }
+    }
+  }
+
   return list;
 }
 
 function parsePageCount(html) {
-  // The page doesn't have traditional pagination for the home page
-  // For category/search pages, look for page links
   const matches = html.match(/[?&]page=(\d+)/g) || [];
   let maxPage = 1;
   for (const m of matches) {
