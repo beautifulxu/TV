@@ -5,7 +5,15 @@ const HEADERS = {
 };
 
 const CLASSES = [
-  ['playlist', '播放列表'],
+  ['裏番', '裏番'],
+  ['泡麵番', '泡麵番'],
+  ['Motion Anime', 'Motion Anime'],
+  ['3DCG', '3DCG'],
+  ['2.5D', '2.5D'],
+  ['2D動畫', '2D動畫'],
+  ['AI生成', 'AI生成'],
+  ['MMD', 'MMD'],
+  ['Cosplay', 'Cosplay'],
 ];
 
 function request(url) {
@@ -21,17 +29,6 @@ function request(url) {
   return '';
 }
 
-function text(value) {
-  return (value || '')
-    .replace(/<[^>]+>/g, '')
-    .replace(/&nbsp;/g, ' ')
-    .replace(/&/g, '&')
-    .replace(/&#39;/g, "'")
-    .replace(/"/g, '"')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-
 function abs(url) {
   if (!url) return '';
   if (url.startsWith('//')) return `https:${url}`;
@@ -43,33 +40,73 @@ function parseList(html) {
   const list = [];
   if (!html) return list;
 
-  // Match video cards: <div class="playlist-video-card video-item-container">...</div>
-  const cardRegex = /<div class="playlist-video-card video-item-container">(.*?)<\/div>\s*<\/div>\s*<\/div>\s*<\/div>/g;
+  // Match horizontal-card structure (used in home page and most search pages)
+  // <div class="horizontal-card">
+  //   <a href="/watch?v=XXX" class="video-link">
+  //     <div class="thumb-container">
+  //       <img src="...">
+  //       ...
+  //     </div>
+  //     <div class="title">标题</div>
+  //   </a>
+  //   <div class="subtitle">...</div>
+  // </div>
+  // </div>
+  const cardRegex = /<div class="horizontal-card">(.*?)<\/div>\s*<\/div>\s*<div class="title">/g;
   let match;
   while ((match = cardRegex.exec(html)) !== null) {
     const card = match[1];
-
-    // Extract href from <a> tag
-    const hrefMatch = card.match(/<a\s+href="([^"]+)"/);
-    // Extract img src
+    const hrefMatch = card.match(/<a[^>]*href="([^"]+watch\?v=\d+[^"]*)"[^>]*class="video-link"/);
+    if (!hrefMatch) continue;
     const imgMatch = card.match(/<img[^>]*src="([^"]+)"/);
-    // Extract title from <h4 class="video-title"><a>标题</a>
-    const titleMatch = card.match(/<h4 class="video-title">\s*<a[^>]*>\s*([^<]+)\s*<\/a>/);
+    const titleStart = match.index + match[0].length;
+    const titleEnd = html.indexOf('</div>', titleStart);
+    const vodName = titleStart < titleEnd ? html.substring(titleStart, titleEnd).trim() : '';
+    const vodId = hrefMatch[1];
+    const vodPic = imgMatch ? imgMatch[1] : '';
+    if (vodId && vodName) {
+      list.push({ vod_id: vodId, vod_name: vodName, vod_pic: vodPic });
+    }
+  }
 
-    const vodId = hrefMatch ? hrefMatch[1] : '';
+  // Match alternative structure (used in some search pages like 裏番)
+  // <a style="text-decoration: none;" href="/watch?v=XXX">
+  //   <div class="home-rows-videos-div search-videos hover-lighter">
+  //     <div class="video-card-inner">
+  //       <img src="cover.jpg">
+  //       <div class="home-rows-videos-title">标题</div>
+  //     </div>
+  //   </div>
+  // </a>
+  const altRegex = /<a[^>]*href="([^"]+watch\?v=\d+[^"]*)"[^>]*>\s*<div class="home-rows-videos-div search-videos hover-lighter">(.*?)<\/a>/g;
+  let altMatch;
+  while ((altMatch = altRegex.exec(html)) !== null) {
+    const vodId = altMatch[1];
+    const content = altMatch[2];
+    const imgMatch = content.match(/<img[^>]*src="([^"]+)"/);
+    const titleMatch = content.match(/<div class="home-rows-videos-title">\s*([^<]+)\s*<\/div>/);
     const vodPic = imgMatch ? imgMatch[1] : '';
     const vodName = titleMatch ? titleMatch[1].trim() : '';
-
     if (vodId && vodName) {
-      list.push({
-        vod_id: vodId,
-        vod_name: vodName,
-        vod_pic: vodPic,
-      });
+      // Avoid duplicates
+      if (!list.some(v => v.vod_id === vodId)) {
+        list.push({ vod_id: vodId, vod_name: vodName, vod_pic: vodPic });
+      }
     }
   }
 
   return list;
+}
+
+function parsePageCount(html) {
+  // Find the last page number from pagination
+  const matches = html.match(/page=(\d+)"/g) || [];
+  let maxPage = 1;
+  for (const m of matches) {
+    const num = parseInt(m.match(/page=(\d+)/)[1]);
+    if (num > maxPage) maxPage = num;
+  }
+  return maxPage;
 }
 
 const spider = {
@@ -82,24 +119,34 @@ const spider = {
   },
 
   homeVod() {
-    return this.category('playlist', '1');
+    // Return latest videos from home page
+    const html = request(HOST);
+    const list = parseList(html);
+    return JSON.stringify({
+      list: list.slice(0, 24),
+    });
   },
 
   category(tid, pg) {
     const page = Number(pg || 1);
+    const sort = '&sort=最新上傳';
     let url;
-    if (tid === 'playlist') {
-      url = `${HOST}/playlist?list=1744`;
+    if (tid === '全部' || !tid) {
+      url = page <= 1 ? `${HOST}/search` : `${HOST}/search?page=${page}`;
     } else {
-      url = `${HOST}/playlist?list=${tid}&page=${page}`;
+      const encodedGenre = encodeURIComponent(tid);
+      url = page <= 1
+        ? `${HOST}/search?genre=${encodedGenre}${sort}`
+        : `${HOST}/search?genre=${encodedGenre}${sort}&page=${page}`;
     }
     const html = request(url);
     const list = parseList(html);
+    const pagecount = parsePageCount(html);
     return JSON.stringify({
       page,
-      pagecount: 1,
+      pagecount: pagecount || 1,
       limit: list.length || 24,
-      total: list.length || 24,
+      total: list.length * (pagecount || 1),
       list: list,
     });
   },
@@ -139,7 +186,7 @@ const spider = {
   },
 
   search(key) {
-    const url = `${HOST}/search?q=${encodeURIComponent(key)}`;
+    const url = `${HOST}/search?query=${encodeURIComponent(key)}`;
     const html = request(url);
     return JSON.stringify({
       list: parseList(html),
