@@ -20,7 +20,7 @@
     },
     {
       "key": "missav",
-      "name": "missav｜动漫",
+      "name": "missav",
       "type": 3,
       "api": "./js/missav.js",
       "searchable": 1,
