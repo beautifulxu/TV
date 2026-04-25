@@ -1508,22 +1508,10 @@
       "key": "badnews",
       "name": "bad.news｜动漫",
       "type": 3,
-      "api": "csp_XBPQ",
+      "api": "./js/badnews.js",
       "searchable": 1,
       "quickSearch": 1,
-      "filterable": 0,
-      "ext": {
-        "url": "https://bad.news/dm",
-        "分类url": "https://bad.news/dm/type/q-{cateId}/page/{catePg}.html",
-        "分类": "3D$3D#同人$同人#Cosplay$Cosplay",
-        "标题": "<h4 class=\"title\">&&</a>",
-        "图片": "data-echo=\"&&\"",
-        "链接": "class=\"afterglow post-thumb\" href=\"&&\"",
-        "分页": "page=",
-        "嗅探词": ".m3u8,.mp4",
-        "免嗅": "0"
-      },
-      "jar": "https://qist.wyfc.qzz.io/jar/spider.jar;md5;427721a1497c71587dca53a2d80f2b42"
+      "filterable": 0
     },
     {
       "key": "路漫漫",
