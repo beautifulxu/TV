@@ -1,18 +1,19 @@
 const HOST = 'https://hanime1.me';
 const HEADERS = {
   'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+  'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+  'Accept-Language': 'zh-TW,zh;q=0.9,en;q=0.8',
   'Origin': HOST,
   'Referer': `${HOST}/`,
 };
 
 const CLASSES = [
+  ['全部', '全部'],
   ['裏番', '裏番'],
   ['泡麵番', '泡麵番'],
   ['Motion Anime', 'Motion Anime'],
-  ['3DCG', '3DCG'],
-  ['2.5D', '2.5D'],
-  ['2D動畫', '2D動畫'],
-  ['AI生成', 'AI生成'],
+  ['3D動畫', '3DCG'],
+  ['同人作品', '同人作品'],
   ['MMD', 'MMD'],
   ['Cosplay', 'Cosplay'],
 ];
@@ -80,6 +81,52 @@ function unique(items) {
 function qualityFromUrl(url) {
   const match = String(url || '').match(/(?:^|[-_/])(\d{3,4}p)(?:[-_.?/#]|$)/i);
   return match ? match[1] : '';
+}
+
+function attr(source, name) {
+  const match = String(source || '').match(new RegExp(`\\b${name}\\s*=\\s*(['"])(.*?)\\1`, 'i'));
+  return match ? decode(match[2]) : '';
+}
+
+function firstMatch(source, patterns) {
+  for (const pattern of patterns) {
+    const match = String(source || '').match(pattern);
+    if (match) {
+      for (let i = match.length - 1; i >= 1; i--) {
+        if (match[i] && match[i] !== '"' && match[i] !== "'") return text(match[i]);
+      }
+    }
+  }
+  return '';
+}
+
+function pickImage(source) {
+  const images = [];
+  const imgRegex = /<img\b([^>]*)>/gi;
+  let match;
+  while ((match = imgRegex.exec(source || '')) !== null) {
+    const attrs = match[1];
+    const src = attr(attrs, 'data-src') || attr(attrs, 'data-original') || attr(attrs, 'src');
+    if (src) images.push(abs(src));
+  }
+  return images.length > 1 ? images[1] : (images[0] || '');
+}
+
+function pickTitle(source) {
+  return firstMatch(source, [
+    /<div[^>]*class=(["'])[^"']*card-mobile-title[^"']*\1[^>]*>([\s\S]*?)<\/div>/i,
+    /<div[^>]*class=(["'])[^"']*home-rows-videos-title[^"']*\1[^>]*>([\s\S]*?)<\/div>/i,
+    /<div[^>]*class=(["'])[^"']*\btitle\b[^"']*\1[^>]*>([\s\S]*?)<\/div>/i,
+  ]) || attr(source, 'alt') || attr(source, 'title');
+}
+
+function addVod(list, id, name, pic) {
+  const vodId = abs(decode(id));
+  const vodName = text(name);
+  const vodPic = abs(decode(pic || ''));
+  if (!vodId || !vodName || !/watch\?v=\d+/i.test(vodId)) return;
+  if (list.some(v => v.vod_id === vodId)) return;
+  list.push({ vod_id: vodId, vod_name: vodName, vod_pic: vodPic });
 }
 
 function parseDownloadList(html) {
@@ -150,6 +197,25 @@ function parseList(html) {
   const list = [];
   if (!html) return list;
 
+  // Current Hanime1 search pages render cards as:
+  // <a href="/watch?v=..."></a><div class="card-mobile-panel...">...</div>
+  const mobileRegex = /<a\b([^>]*href=(["'])([^"']*watch\?v=\d+[^"']*)\2[^>]*)>[\s\S]*?<\/a>\s*<div\b[^>]*class=(["'])[^"']*card-mobile-panel[^"']*\4[^>]*>([\s\S]*?)(?=<a\b[^>]*href=(["'])[^"']*watch\?v=|<div\b[^>]*class=(["'])[^"']*card-mobile-panel|<\/body|$)/gi;
+  let mobileMatch;
+  while ((mobileMatch = mobileRegex.exec(html)) !== null) {
+    const vodId = mobileMatch[3];
+    const card = mobileMatch[5];
+    addVod(list, vodId, pickTitle(card), pickImage(card));
+  }
+
+  // Simplified rows used by home/list/related blocks.
+  const anchorRegex = /<a\b([^>]*href=(["'])([^"']*watch\?v=\d+[^"']*)\2[^>]*)>([\s\S]*?)<\/a>/gi;
+  let anchorMatch;
+  while ((anchorMatch = anchorRegex.exec(html)) !== null) {
+    const vodId = anchorMatch[3];
+    const content = anchorMatch[4];
+    addVod(list, vodId, pickTitle(content), pickImage(content));
+  }
+
   // Match horizontal-card structure (used in home page and most search pages)
   // <div class="horizontal-card">
   //   <a href="/watch?v=XXX" class="video-link">
@@ -174,9 +240,7 @@ function parseList(html) {
     const vodName = titleStart < titleEnd ? html.substring(titleStart, titleEnd).trim() : '';
     const vodId = hrefMatch[1];
     const vodPic = imgMatch ? imgMatch[1] : '';
-    if (vodId && vodName) {
-      list.push({ vod_id: vodId, vod_name: vodName, vod_pic: vodPic });
-    }
+    addVod(list, vodId, vodName, vodPic);
   }
 
   // Match alternative structure (used in some search pages like 裏番)
@@ -197,12 +261,7 @@ function parseList(html) {
     const titleMatch = content.match(/<div class="home-rows-videos-title">\s*([^<]+)\s*<\/div>/);
     const vodPic = imgMatch ? imgMatch[1] : '';
     const vodName = titleMatch ? titleMatch[1].trim() : '';
-    if (vodId && vodName) {
-      // Avoid duplicates
-      if (!list.some(v => v.vod_id === vodId)) {
-        list.push({ vod_id: vodId, vod_name: vodName, vod_pic: vodPic });
-      }
-    }
+    addVod(list, vodId, vodName, vodPic);
   }
 
   return list;
@@ -210,13 +269,22 @@ function parseList(html) {
 
 function parsePageCount(html) {
   // Find the last page number from pagination
-  const matches = html.match(/page=(\d+)"/g) || [];
+  const matches = html.match(/(?:page=|\/page\/)(\d+)/g) || [];
   let maxPage = 1;
   for (const m of matches) {
-    const num = parseInt(m.match(/page=(\d+)/)[1]);
+    const num = parseInt(m.match(/(\d+)/)[1]);
     if (num > maxPage) maxPage = num;
   }
   return maxPage;
+}
+
+function searchUrl(params) {
+  const query = [];
+  if (params.page) query.push(`page=${params.page}`);
+  if (params.query) query.push(`query=${encodeURIComponent(params.query)}`);
+  if (params.genre && params.genre !== '全部') query.push(`genre=${encodeURIComponent(params.genre)}`);
+  if (params.sort) query.push(`sort=${encodeURIComponent(params.sort)}`);
+  return `${HOST}/search${query.length ? '?' + query.join('&') : ''}`;
 }
 
 const spider = {
@@ -229,26 +297,12 @@ const spider = {
   },
 
   homeVod() {
-    // Return latest videos from home page
-    const html = request(HOST);
-    const list = parseList(html);
-    return JSON.stringify({
-      list: list.slice(0, 24),
-    });
+    return this.category('全部', '1');
   },
 
   category(tid, pg) {
     const page = Number(pg || 1);
-    const sort = '&sort=最新上傳';
-    let url;
-    if (tid === '全部' || !tid) {
-      url = page <= 1 ? `${HOST}/search` : `${HOST}/search?page=${page}`;
-    } else {
-      const encodedGenre = encodeURIComponent(tid);
-      url = page <= 1
-        ? `${HOST}/search?genre=${encodedGenre}${sort}`
-        : `${HOST}/search?genre=${encodedGenre}${sort}&page=${page}`;
-    }
+    const url = searchUrl({ page, genre: tid, sort: '最新上傳' });
     const html = request(url);
     const list = parseList(html);
     const pagecount = parsePageCount(html);
@@ -297,7 +351,7 @@ const spider = {
   },
 
   search(key) {
-    const url = `${HOST}/search?query=${encodeURIComponent(key)}`;
+    const url = searchUrl({ page: 1, query: key, sort: '最新上傳' });
     const html = request(url);
     return JSON.stringify({
       list: parseList(html),
