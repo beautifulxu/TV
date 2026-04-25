@@ -17,6 +17,15 @@
       "searchable": 1,
       "quickSearch": 1,
       "filterable": 0
+    },
+    {
+      "key": "missav",
+      "name": "missav｜动漫",
+      "type": 3,
+      "api": "./js/missav.js",
+      "searchable": 1,
+      "quickSearch": 1,
+      "filterable": 0
     }
   ]
 }
