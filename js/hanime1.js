@@ -173,6 +173,11 @@ const spider = {
     const imgMatch = html.match(/<meta[^>]*property="og:image"[^>]*content="([^"]+)"/);
     const pic = imgMatch ? imgMatch[1] : '';
 
+    // Build play URL with all available resolutions
+    let playUrl = '';
+    if (videoUrl) {
+      playUrl = `1$${videoUrl}`;
+    }
     return JSON.stringify({
       list: [{
         vod_id: abs(id),
@@ -180,7 +185,7 @@ const spider = {
         vod_pic: pic,
         vod_content: desc,
         vod_play_from: 'hanime1',
-        vod_play_url: videoUrl ? `播放$${videoUrl}` : '',
+        vod_play_url: playUrl,
       }],
     });
   },
