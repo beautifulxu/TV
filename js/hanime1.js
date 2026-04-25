@@ -1,7 +1,9 @@
 const HOST = 'https://hanime1.me';
 const HEADERS = {
   'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-  Referer: `${HOST}/`,
+  'Referer': `${HOST}/`,
+  'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+  'Accept-Language': 'en-US,en;q=0.5',
 };
 
 const CLASSES = [
@@ -9,8 +11,17 @@ const CLASSES = [
 ];
 
 function request(url) {
-  const res = globalThis._http(url, { headers: HEADERS, timeout: 15000 });
-  return res && res.content ? res.content : '';
+  try {
+    const res = globalThis._http(url, { headers: HEADERS, timeout: 15000 });
+    if (res && res.content) {
+      // Check if we got blocked by Cloudflare
+      if (res.content.indexOf('Attention Required') !== -1 || res.content.indexOf('Cloudflare') !== -1) {
+        return '';
+      }
+      return res.content;
+    }
+  } catch(e) {}
+  return '';
 }
 
 function text(value) {
@@ -33,44 +44,53 @@ function abs(url) {
 
 function parseVideoList(html) {
   const list = [];
-  // Match video card blocks - hanime1 uses div.video-card or similar
-  const blocks = html.match(/<div[^>]*class="[^"]*video[^"]*"[^>]*>[\s\S]*?<\/div>\s*<\/div>/g) || [];
-  for (const block of blocks) {
-    const hrefMatch = block.match(/href="([^"]+)"[^>]*>/);
-    const imgMatch = block.match(/src="([^"]+\.(jpg|jpeg|png|webp)[^"]*)"/);
-    const titleMatch = block.match(/title="([^"]*)"/);
-    const nameMatch = block.match(/alt="([^"]*)"/);
+  if (!html) return list;
 
-    const vodId = hrefMatch ? abs(hrefMatch[1]) : '';
-    const vodPic = imgMatch ? imgMatch[1] : '';
-    const vodName = titleMatch ? titleMatch[1] : (nameMatch ? nameMatch[1] : '');
-    if (!vodId || !vodName) continue;
-    list.push({
-      vod_id: vodId,
-      vod_name: vodName,
-      vod_pic: vodPic,
-    });
+  // Try to match video items from playlist page
+  // Pattern 1: <a href="/watch?v=XXXX"> with thumbnail
+  const itemRegex = /<a[^>]*href="(\/watch\?v=[^"]+)"[^>]*>[\s\S]*?<img[^>]*src="([^"]+)"[^>]*>[\s\S]*?<div[^>]*class="[^"]*title[^"]*"[^>]*>([\s\S]*?)<\/div>/g;
+  let match;
+  while ((match = itemRegex.exec(html)) !== null) {
+    const vodId = abs(match[1]);
+    const vodPic = match[2];
+    const vodName = text(match[3]);
+    if (vodId && vodName) {
+      list.push({ vod_id: vodId, vod_name: vodName, vod_pic: vodPic });
+    }
   }
 
-  // Fallback: try to match from playlist page structure
+  // Pattern 2: Simpler structure
   if (list.length === 0) {
-    // Match links with thumbnails
-    const linkBlocks = html.match(/<a[^>]*href="[^"]*watch\?v=[^"]*"[^>]*>[\s\S]*?<\/a>/g) || [];
-    for (const block of linkBlocks) {
+    const blocks = html.match(/<a[^>]*href="[^"]*watch\?v=[^"]*"[^>]*>[\s\S]*?<\/a>/g) || [];
+    for (const block of blocks) {
       const hrefMatch = block.match(/href="([^"]+)"/);
       const imgMatch = block.match(/<img[^>]*src="([^"]+)"/);
       const titleMatch = block.match(/title="([^"]*)"/);
-      const nameMatch = block.match(/alt="([^"]*)"/);
-
+      const altMatch = block.match(/alt="([^"]*)"/);
       const vodId = hrefMatch ? abs(hrefMatch[1]) : '';
       const vodPic = imgMatch ? imgMatch[1] : '';
-      const vodName = titleMatch ? titleMatch[1] : (nameMatch ? nameMatch[1] : '');
-      if (!vodId || !vodName) continue;
-      list.push({
-        vod_id: vodId,
-        vod_name: vodName,
-        vod_pic: vodPic,
-      });
+      const vodName = titleMatch ? titleMatch[1] : (altMatch ? altMatch[1] : '');
+      if (vodId && vodName) {
+        list.push({ vod_id: vodId, vod_name: vodName, vod_pic: vodPic });
+      }
+    }
+  }
+
+  // Pattern 3: JSON data embedded in page
+  if (list.length === 0) {
+    const jsonMatch = html.match(/window\.__INITIAL_STATE__\s*=\s*({[\s\S]*?});/);
+    if (jsonMatch) {
+      try {
+        const data = JSON.parse(jsonMatch[1]);
+        const videos = data.videos || data.playlist || data.list || [];
+        for (const v of videos) {
+          list.push({
+            vod_id: abs(v.url || v.link || `/watch?v=${v.id}`),
+            vod_name: v.title || v.name || '',
+            vod_pic: v.thumbnail || v.pic || v.image || '',
+          });
+        }
+      } catch(e) {}
     }
   }
 
@@ -78,8 +98,8 @@ function parseVideoList(html) {
 }
 
 function parsePageCount(html) {
-  // Try to find pagination
-  const pageLinks = html.match(/page=(\d+)/g) || [];
+  if (!html) return 1;
+  const pageLinks = html.match(/[?&]page=(\d+)/g) || [];
   let maxPage = 1;
   for (const m of pageLinks) {
     const num = parseInt(m.split('=')[1]);
@@ -105,7 +125,6 @@ const spider = {
     const page = Number(pg || 1);
     let url;
     if (tid === 'playlist') {
-      // Use the specific playlist URL
       url = `${HOST}/playlist?list=1744`;
     } else {
       url = `${HOST}/playlist?list=${tid}&page=${page}`;
@@ -123,8 +142,10 @@ const spider = {
 
   detail(id) {
     const html = request(abs(id));
-    // Extract video source URL - hanime1 typically uses video.js or similar
-    // Try multiple patterns
+    if (!html) {
+      return JSON.stringify({ list: [] });
+    }
+
     let videoUrl = '';
     const patterns = [
       /data-src=['"]([^'"]+\.(?:mp4|m3u8)[^'"]*)['"]/,
@@ -142,15 +163,12 @@ const spider = {
       }
     }
 
-    // Extract title
     const titleMatch = html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/);
     const name = titleMatch ? text(titleMatch[1]) : '';
 
-    // Extract description
     const descMatch = html.match(/<meta[^>]*name="description"[^>]*content="([^"]*)"/);
     const desc = descMatch ? descMatch[1] : '';
 
-    // Extract image
     const imgMatch = html.match(/<meta[^>]*property="og:image"[^>]*content="([^"]+)"/);
     const pic = imgMatch ? imgMatch[1] : '';
 
@@ -182,26 +200,11 @@ const spider = {
     });
   },
 
-  live() {
-    return '';
-  },
-
-  sniffer() {
-    return false;
-  },
-
-  isVideo(url) {
-    return /\.(mp4|m3u8)(\?|$)/i.test(url);
-  },
-
-  proxy() {
-    return [404, 'text/plain', ''];
-  },
-
-  action() {
-    return '';
-  },
-
+  live() { return ''; },
+  sniffer() { return false; },
+  isVideo(url) { return /\.(mp4|m3u8)(\?|$)/i.test(url); },
+  proxy() { return [404, 'text/plain', '']; },
+  action() { return ''; },
   destroy() {},
 };
 
