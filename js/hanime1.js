@@ -2,8 +2,6 @@ const HOST = 'https://hanime1.me';
 const HEADERS = {
   'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
   'Referer': `${HOST}/`,
-  'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-  'Accept-Language': 'en-US,en;q=0.5',
 };
 
 const CLASSES = [
@@ -14,7 +12,6 @@ function request(url) {
   try {
     const res = globalThis._http(url, { headers: HEADERS, timeout: 15000 });
     if (res && res.content) {
-      // Check if we got blocked by Cloudflare
       if (res.content.indexOf('Attention Required') !== -1 || res.content.indexOf('Cloudflare') !== -1) {
         return '';
       }
@@ -42,70 +39,78 @@ function abs(url) {
   return url;
 }
 
-function parseVideoList(html) {
+function parseList(html) {
   const list = [];
   if (!html) return list;
 
-  // Try to match video items from playlist page
-  // Pattern 1: <a href="/watch?v=XXXX"> with thumbnail
-  const itemRegex = /<a[^>]*href="(\/watch\?v=[^"]+)"[^>]*>[\s\S]*?<img[^>]*src="([^"]+)"[^>]*>[\s\S]*?<div[^>]*class="[^"]*title[^"]*"[^>]*>([\s\S]*?)<\/div>/g;
+  // Try to find all links that look like video/watch pages
+  const linkRegex = /<a[^>]*href="([^"]*\/watch\?v=[^"]*)"[^>]*>([\s\S]*?)<\/a>/gi;
   let match;
-  while ((match = itemRegex.exec(html)) !== null) {
-    const vodId = abs(match[1]);
-    const vodPic = match[2];
-    const vodName = text(match[3]);
-    if (vodId && vodName) {
-      list.push({ vod_id: vodId, vod_name: vodName, vod_pic: vodPic });
+  while ((match = linkRegex.exec(html)) !== null) {
+    const href = match[1];
+    const inner = match[2];
+
+    // Extract image from inside the link
+    const imgMatch = inner.match(/<img[^>]*src="([^"]+)"[^>]*>/);
+    const vodPic = imgMatch ? imgMatch[1] : '';
+
+    // Extract title from inside the link
+    const titleMatch = inner.match(/title="([^"]*)"/);
+    const altMatch = inner.match(/alt="([^"]*)"/);
+    const textMatch = inner.match(/>([^<]+)</);
+    const vodName = titleMatch ? titleMatch[1] : (altMatch ? altMatch[1] : (textMatch ? textMatch[1].trim() : ''));
+
+    if (href && vodName) {
+      list.push({
+        vod_id: abs(href),
+        vod_name: vodName,
+        vod_pic: vodPic,
+      });
     }
   }
 
-  // Pattern 2: Simpler structure
+  // If no watch links found, try to find any links with thumbnails
   if (list.length === 0) {
-    const blocks = html.match(/<a[^>]*href="[^"]*watch\?v=[^"]*"[^>]*>[\s\S]*?<\/a>/g) || [];
+    const blocks = html.match(/<a[^>]*href="([^"]+)"[^>]*>[\s\S]*?<img[^>]*src="([^"]+)"[^>]*>[\s\S]*?<\/a>/g) || [];
     for (const block of blocks) {
       const hrefMatch = block.match(/href="([^"]+)"/);
-      const imgMatch = block.match(/<img[^>]*src="([^"]+)"/);
+      const imgMatch = block.match(/src="([^"]+)"/);
       const titleMatch = block.match(/title="([^"]*)"/);
       const altMatch = block.match(/alt="([^"]*)"/);
       const vodId = hrefMatch ? abs(hrefMatch[1]) : '';
       const vodPic = imgMatch ? imgMatch[1] : '';
       const vodName = titleMatch ? titleMatch[1] : (altMatch ? altMatch[1] : '');
-      if (vodId && vodName) {
+      if (vodId && vodName && !vodId.includes('cdn-cgi')) {
         list.push({ vod_id: vodId, vod_name: vodName, vod_pic: vodPic });
       }
     }
   }
 
-  // Pattern 3: JSON data embedded in page
+  // Last resort: try to parse JSON data from script tags
   if (list.length === 0) {
-    const jsonMatch = html.match(/window\.__INITIAL_STATE__\s*=\s*({[\s\S]*?});/);
-    if (jsonMatch) {
-      try {
-        const data = JSON.parse(jsonMatch[1]);
-        const videos = data.videos || data.playlist || data.list || [];
-        for (const v of videos) {
-          list.push({
-            vod_id: abs(v.url || v.link || `/watch?v=${v.id}`),
-            vod_name: v.title || v.name || '',
-            vod_pic: v.thumbnail || v.pic || v.image || '',
-          });
-        }
-      } catch(e) {}
+    const scriptRegex = /<script[^>]*>([\s\S]*?)<\/script>/g;
+    while ((match = scriptRegex.exec(html)) !== null) {
+      const scriptContent = match[1];
+      // Try to find JSON data with video/playlist info
+      const jsonMatch = scriptContent.match(/\[[\s\S]*?"(?:title|name)"[\s\S]*?\]/);
+      if (jsonMatch) {
+        try {
+          const data = JSON.parse(jsonMatch[0]);
+          for (const item of data) {
+            if (item.title || item.name) {
+              list.push({
+                vod_id: abs(item.url || item.link || item.id || ''),
+                vod_name: item.title || item.name || '',
+                vod_pic: item.thumbnail || item.pic || item.image || item.thumb || '',
+              });
+            }
+          }
+        } catch(e) {}
+      }
     }
   }
 
   return list;
-}
-
-function parsePageCount(html) {
-  if (!html) return 1;
-  const pageLinks = html.match(/[?&]page=(\d+)/g) || [];
-  let maxPage = 1;
-  for (const m of pageLinks) {
-    const num = parseInt(m.split('=')[1]);
-    if (num > maxPage) maxPage = num;
-  }
-  return maxPage;
 }
 
 const spider = {
@@ -130,13 +135,13 @@ const spider = {
       url = `${HOST}/playlist?list=${tid}&page=${page}`;
     }
     const html = request(url);
-    const pagecount = parsePageCount(html);
+    const list = parseList(html);
     return JSON.stringify({
       page,
-      pagecount,
-      limit: 24,
-      total: pagecount * 24,
-      list: parseVideoList(html),
+      pagecount: 1,
+      limit: list.length || 24,
+      total: list.length || 24,
+      list: list,
     });
   },
 
@@ -148,12 +153,12 @@ const spider = {
 
     let videoUrl = '';
     const patterns = [
-      /data-src=['"]([^'"]+\.(?:mp4|m3u8)[^'"]*)['"]/,
-      /src=['"]([^'"]+\.(?:mp4|m3u8)[^'"]*)['"]/,
-      /source[^>]*src=['"]([^'"]+)['"]/,
-      /video[^>]*src=['"]([^'"]+)['"]/,
       /"url"\s*:\s*"([^"]+\.(?:mp4|m3u8)[^"]+)"/,
       /"video_url"\s*:\s*"([^"]+)"/,
+      /data-src=['"]([^'"]+\.(?:mp4|m3u8)[^'"]*)['"]/,
+      /<source[^>]*src=['"]([^'"]+)['"]/,
+      /<video[^>]*src=['"]([^'"]+)['"]/,
+      /src=['"]([^'"]+\.(?:mp4|m3u8)[^'"]*)['"]/,
     ];
     for (const pattern of patterns) {
       const match = html.match(pattern);
@@ -188,7 +193,7 @@ const spider = {
     const url = `${HOST}/search?q=${encodeURIComponent(key)}`;
     const html = request(url);
     return JSON.stringify({
-      list: parseVideoList(html),
+      list: parseList(html),
     });
   },
 
