@@ -43,70 +43,29 @@ function parseList(html) {
   const list = [];
   if (!html) return list;
 
-  // Try to find all links that look like video/watch pages
-  const linkRegex = /<a[^>]*href="([^"]*\/watch\?v=[^"]*)"[^>]*>([\s\S]*?)<\/a>/gi;
+  // Match video cards: <div class="playlist-video-card video-item-container">...</div>
+  const cardRegex = /<div class="playlist-video-card video-item-container">(.*?)<\/div>\s*<\/div>\s*<\/div>\s*<\/div>/g;
   let match;
-  while ((match = linkRegex.exec(html)) !== null) {
-    const href = match[1];
-    const inner = match[2];
+  while ((match = cardRegex.exec(html)) !== null) {
+    const card = match[1];
 
-    // Extract image from inside the link
-    const imgMatch = inner.match(/<img[^>]*src="([^"]+)"[^>]*>/);
+    // Extract href from <a> tag
+    const hrefMatch = card.match(/<a\s+href="([^"]+)"/);
+    // Extract img src
+    const imgMatch = card.match(/<img[^>]*src="([^"]+)"/);
+    // Extract title from <h4 class="video-title"><a>标题</a>
+    const titleMatch = card.match(/<h4 class="video-title">\s*<a[^>]*>\s*([^<]+)\s*<\/a>/);
+
+    const vodId = hrefMatch ? hrefMatch[1] : '';
     const vodPic = imgMatch ? imgMatch[1] : '';
+    const vodName = titleMatch ? titleMatch[1].trim() : '';
 
-    // Extract title from inside the link
-    const titleMatch = inner.match(/title="([^"]*)"/);
-    const altMatch = inner.match(/alt="([^"]*)"/);
-    const textMatch = inner.match(/>([^<]+)</);
-    const vodName = titleMatch ? titleMatch[1] : (altMatch ? altMatch[1] : (textMatch ? textMatch[1].trim() : ''));
-
-    if (href && vodName) {
+    if (vodId && vodName) {
       list.push({
-        vod_id: abs(href),
+        vod_id: vodId,
         vod_name: vodName,
         vod_pic: vodPic,
       });
-    }
-  }
-
-  // If no watch links found, try to find any links with thumbnails
-  if (list.length === 0) {
-    const blocks = html.match(/<a[^>]*href="([^"]+)"[^>]*>[\s\S]*?<img[^>]*src="([^"]+)"[^>]*>[\s\S]*?<\/a>/g) || [];
-    for (const block of blocks) {
-      const hrefMatch = block.match(/href="([^"]+)"/);
-      const imgMatch = block.match(/src="([^"]+)"/);
-      const titleMatch = block.match(/title="([^"]*)"/);
-      const altMatch = block.match(/alt="([^"]*)"/);
-      const vodId = hrefMatch ? abs(hrefMatch[1]) : '';
-      const vodPic = imgMatch ? imgMatch[1] : '';
-      const vodName = titleMatch ? titleMatch[1] : (altMatch ? altMatch[1] : '');
-      if (vodId && vodName && !vodId.includes('cdn-cgi')) {
-        list.push({ vod_id: vodId, vod_name: vodName, vod_pic: vodPic });
-      }
-    }
-  }
-
-  // Last resort: try to parse JSON data from script tags
-  if (list.length === 0) {
-    const scriptRegex = /<script[^>]*>([\s\S]*?)<\/script>/g;
-    while ((match = scriptRegex.exec(html)) !== null) {
-      const scriptContent = match[1];
-      // Try to find JSON data with video/playlist info
-      const jsonMatch = scriptContent.match(/\[[\s\S]*?"(?:title|name)"[\s\S]*?\]/);
-      if (jsonMatch) {
-        try {
-          const data = JSON.parse(jsonMatch[0]);
-          for (const item of data) {
-            if (item.title || item.name) {
-              list.push({
-                vod_id: abs(item.url || item.link || item.id || ''),
-                vod_name: item.title || item.name || '',
-                vod_pic: item.thumbnail || item.pic || item.image || item.thumb || '',
-              });
-            }
-          }
-        } catch(e) {}
-      }
     }
   }
 
@@ -151,29 +110,19 @@ const spider = {
       return JSON.stringify({ list: [] });
     }
 
-    let videoUrl = '';
-    const patterns = [
-      /"url"\s*:\s*"([^"]+\.(?:mp4|m3u8)[^"]+)"/,
-      /"video_url"\s*:\s*"([^"]+)"/,
-      /data-src=['"]([^'"]+\.(?:mp4|m3u8)[^'"]*)['"]/,
-      /<source[^>]*src=['"]([^'"]+)['"]/,
-      /<video[^>]*src=['"]([^'"]+)['"]/,
-      /src=['"]([^'"]+\.(?:mp4|m3u8)[^'"]*)['"]/,
-    ];
-    for (const pattern of patterns) {
-      const match = html.match(pattern);
-      if (match) {
-        videoUrl = match[1].replace(/\\u002F/g, '/').replace(/\\\//g, '/');
-        break;
-      }
-    }
+    // Extract video source: <source src="...">
+    const sourceMatch = html.match(/<source[^>]*src="([^"]+)"/);
+    const videoUrl = sourceMatch ? sourceMatch[1] : '';
 
-    const titleMatch = html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/);
-    const name = titleMatch ? text(titleMatch[1]) : '';
+    // Extract title from og:title
+    const ogTitleMatch = html.match(/<meta[^>]*property="og:title"[^>]*content="([^"]+)"/);
+    const name = ogTitleMatch ? ogTitleMatch[1].replace(/ - Hanime1\.me$/, '') : '';
 
+    // Extract description
     const descMatch = html.match(/<meta[^>]*name="description"[^>]*content="([^"]*)"/);
     const desc = descMatch ? descMatch[1] : '';
 
+    // Extract image from og:image
     const imgMatch = html.match(/<meta[^>]*property="og:image"[^>]*content="([^"]+)"/);
     const pic = imgMatch ? imgMatch[1] : '';
 
